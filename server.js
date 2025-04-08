@@ -4,77 +4,78 @@ const cors = require("cors");
 const { Server } = require("socket.io");
 
 const app = express();
-app.use(cors());
+
+// CORS ayarlarını güncelle
+app.use(cors({
+  origin: ["http://localhost:5173", "https://secretchat-server.onrender.com"],
+  methods: ["GET", "POST"],
+  credentials: true
+}));
 
 const server = http.createServer(app);
+
+// Socket.IO ayarlarını güncelle
 const io = new Server(server, {
   cors: {
-    origin: "*", // Netlify domainini buraya yazabilirsin
-    methods: ["GET", "POST"]
-  }
+    origin: ["http://localhost:5173", "https://secretchat-server.onrender.com"],
+    methods: ["GET", "POST"],
+    credentials: true
+  },
+  transports: ['websocket', 'polling'],
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
-// Basit kullanıcı kuyruğu
-let waitingUsers = [];
+// Bağlantı sayacı ve aktif kullanıcılar
+let connectionCount = 0;
+const activeUsers = new Map();
+
+// Test endpoint'i
+app.get('/test', (req, res) => {
+  res.json({ 
+    status: 'Server is running',
+    connections: connectionCount,
+    activeUsers: Array.from(activeUsers.keys()),
+    timestamp: new Date().toISOString()
+  });
+});
 
 io.on("connection", (socket) => {
-  console.log("✅ Kullanıcı bağlandı:", socket.id);
+  connectionCount++;
+  console.error(`✅ Yeni kullanıcı bağlandı! Socket ID: ${socket.id}`);
+  console.error(`📊 Toplam bağlı kullanıcı sayısı: ${connectionCount}`);
 
-  // Kullanıcıyı kaydetmek istersen
   socket.on("register", (userId) => {
-    console.log(`🪪 Kullanıcı kaydoldu: ${userId} (${socket.id})`);
-    socket.data.userId = userId;
+    activeUsers.set(userId, socket.id);
+    console.error(`👤 Kullanıcı kaydı: ${userId}`);
+    console.error(`📊 Aktif kullanıcılar: ${Array.from(activeUsers.keys()).join(', ')}`);
   });
 
-  // Eşleşme isteği
-  socket.on("find_match", ({ userId, preferences }) => {
-    console.log("🔍 Eşleşme aranıyor:", userId, socket.id, preferences);
-
-    if (waitingUsers.length > 0) {
-      const partnerSocket = waitingUsers.pop();
-
-      const roomId = `${socket.id}#${partnerSocket.id}`;
-
-      socket.join(roomId);
-      partnerSocket.join(roomId);
-
-      socket.emit("partner_found", { roomId });
-      partnerSocket.emit("partner_found", { roomId });
-
-      console.log(`💬 Eşleşme tamamlandı! Oda: ${roomId}`);
-    } else {
-      // Beklemeye al
-      waitingUsers.push(socket);
-      console.log("⏳ Beklemeye alındı:", userId);
-    }
-  });
-
-  // Eşleşme iptali
-  socket.on("cancel_search", (userId) => {
-    waitingUsers = waitingUsers.filter(s => s.id !== socket.id);
-    console.log("❌ Eşleşme iptal edildi:", userId);
-  });
-
-  // Mesaj gönderme
-  socket.on("send_message", ({ to, message }) => {
-    console.log(`📩 Mesaj gönderiliyor: ${socket.id} → ${to}`, message);
-    io.to(to).emit("receive_message", {
-      from: socket.id,
-      message,
-    });
+  socket.on("find_match", (data) => {
+    const { userId, preferences } = data;
+    console.error(`🔍 Eşleşme isteği:`, { userId, preferences });
   });
 
   socket.on("disconnect", () => {
-    console.log("❌ Kullanıcı ayrıldı:", socket.id);
-    waitingUsers = waitingUsers.filter(s => s.id !== socket.id);
+    connectionCount--;
+    console.error(`❌ Kullanıcı ayrıldı: ${socket.id}`);
+    console.error(`📊 Kalan bağlı kullanıcı sayısı: ${connectionCount}`);
+    
+    // Kullanıcıyı activeUsers'dan kaldır
+    for (const [userId, socketId] of activeUsers.entries()) {
+      if (socketId === socket.id) {
+        activeUsers.delete(userId);
+        console.error(`👤 Kullanıcı çıkış yaptı: ${userId}`);
+        console.error(`📊 Kalan aktif kullanıcılar: ${Array.from(activeUsers.keys()).join(', ')}`);
+        break;
+      }
+    }
   });
 });
 
-// Test için:
-app.get("/", (req, res) => {
-  res.send("✅ Secret Chat Socket.IO server is running.");
-});
-
-server.listen(3000, () => {
-  console.log("🚀 Sunucu 3000 portunda çalışıyor");
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.error(`🚀 Sunucu ${PORT} portunda çalışıyor`);
+  console.error(`🌐 Sunucu URL: ${process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000'}`);
+  console.error(`📊 Başlangıçta bağlı kullanıcı sayısı: ${connectionCount}`);
 });
