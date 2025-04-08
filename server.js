@@ -9,45 +9,70 @@ app.use(cors());
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: "*", // Netlify'den gelen bağlantıya izin verir
+    origin: "*", // Netlify domainini buraya yazabilirsin
     methods: ["GET", "POST"]
   }
 });
 
-// Basit bekleyen kullanıcı listesi
+// Basit kullanıcı kuyruğu
 let waitingUsers = [];
 
 io.on("connection", (socket) => {
   console.log("✅ Kullanıcı bağlandı:", socket.id);
 
-  socket.on("find_partner", () => {
-    console.log("🔍 Eşleşme aranıyor:", socket.id);
+  // Kullanıcıyı kaydetmek istersen
+  socket.on("register", (userId) => {
+    console.log(`🪪 Kullanıcı kaydoldu: ${userId} (${socket.id})`);
+    socket.data.userId = userId;
+  });
+
+  // Eşleşme isteği
+  socket.on("find_match", ({ userId, preferences }) => {
+    console.log("🔍 Eşleşme aranıyor:", userId, socket.id, preferences);
 
     if (waitingUsers.length > 0) {
-      const partnerId = waitingUsers.pop();
-      const roomId = `${socket.id}#${partnerId}`;
+      const partnerSocket = waitingUsers.pop();
+
+      const roomId = `${socket.id}#${partnerSocket.id}`;
 
       socket.join(roomId);
-      io.sockets.sockets.get(partnerId)?.join(roomId);
+      partnerSocket.join(roomId);
 
-      io.to(socket.id).emit("partner_found", { roomId });
-      io.to(partnerId).emit("partner_found", { roomId });
+      socket.emit("partner_found", { roomId });
+      partnerSocket.emit("partner_found", { roomId });
 
       console.log(`💬 Eşleşme tamamlandı! Oda: ${roomId}`);
     } else {
-      waitingUsers.push(socket.id);
-      console.log("⏳ Beklemeye alındı:", socket.id);
+      // Beklemeye al
+      waitingUsers.push(socket);
+      console.log("⏳ Beklemeye alındı:", userId);
     }
+  });
+
+  // Eşleşme iptali
+  socket.on("cancel_search", (userId) => {
+    waitingUsers = waitingUsers.filter(s => s.id !== socket.id);
+    console.log("❌ Eşleşme iptal edildi:", userId);
+  });
+
+  // Mesaj gönderme
+  socket.on("send_message", ({ to, message }) => {
+    console.log(`📩 Mesaj gönderiliyor: ${socket.id} → ${to}`, message);
+    io.to(to).emit("receive_message", {
+      from: socket.id,
+      message,
+    });
   });
 
   socket.on("disconnect", () => {
     console.log("❌ Kullanıcı ayrıldı:", socket.id);
-    waitingUsers = waitingUsers.filter(id => id !== socket.id);
+    waitingUsers = waitingUsers.filter(s => s.id !== socket.id);
   });
 });
 
+// Test için:
 app.get("/", (req, res) => {
-  res.send("✅ Socket.IO server is up and running");
+  res.send("✅ Secret Chat Socket.IO server is running.");
 });
 
 server.listen(3000, () => {
