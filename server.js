@@ -5,19 +5,19 @@ const { Server } = require("socket.io");
 
 const app = express();
 
-// CORS ayarlarını güncelle
+// CORS ayarlarını güncelle - tüm IP'lere izin ver
 app.use(cors({
-  origin: ["http://localhost:5173", "https://secretchat-server.onrender.com"],
+  origin: "*",
   methods: ["GET", "POST"],
   credentials: true
 }));
 
 const server = http.createServer(app);
 
-// Socket.IO ayarlarını güncelle
+// Socket.IO ayarlarını güncelle - tüm IP'lere izin ver
 const io = new Server(server, {
   cors: {
-    origin: ["http://localhost:5173", "https://secretchat-server.onrender.com"],
+    origin: "*",
     methods: ["GET", "POST"],
     credentials: true
   },
@@ -74,8 +74,10 @@ io.on("connection", (socket) => {
 });
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.error(`🚀 Sunucu ${PORT} portunda çalışıyor`);
-  console.error(`🌐 Sunucu URL: ${process.env.RENDER_EXTERNAL_URL || 'http://localhost:3000'}`);
+const HOST = '0.0.0.0'; // Tüm IP adreslerinden erişime izin ver
+
+server.listen(PORT, HOST, () => {
+  console.error(`🚀 Sunucu ${HOST}:${PORT} adresinde çalışıyor`);
+  console.error(`🌐 Yerel IP: http://192.168.1.103:${PORT}`);
   console.error(`📊 Başlangıçta bağlı kullanıcı sayısı: ${connectionCount}`);
 });
