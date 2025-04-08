@@ -29,6 +29,7 @@ const io = new Server(server, {
 // Bağlantı sayacı ve aktif kullanıcılar
 let connectionCount = 0;
 const activeUsers = new Map();
+const waitingUsers = new Map(); // Eşleşme bekleyen kullanıcılar
 
 // Test endpoint'i
 app.get('/test', (req, res) => {
@@ -36,6 +37,7 @@ app.get('/test', (req, res) => {
     status: 'Server is running',
     connections: connectionCount,
     activeUsers: Array.from(activeUsers.keys()),
+    waitingUsers: Array.from(waitingUsers.keys()),
     timestamp: new Date().toISOString()
   });
 });
@@ -45,8 +47,9 @@ io.on("connection", (socket) => {
   console.error(`✅ Yeni kullanıcı bağlandı! Socket ID: ${socket.id}`);
   console.error(`📊 Toplam bağlı kullanıcı sayısı: ${connectionCount}`);
 
-  socket.on("register", (userId) => {
-    activeUsers.set(userId, socket.id);
+  socket.on("register", (data) => {
+    const { userId, profile } = data;
+    activeUsers.set(userId, { socketId: socket.id, profile });
     console.error(`👤 Kullanıcı kaydı: ${userId}`);
     console.error(`📊 Aktif kullanıcılar: ${Array.from(activeUsers.keys()).join(', ')}`);
   });
@@ -54,6 +57,20 @@ io.on("connection", (socket) => {
   socket.on("find_match", (data) => {
     const { userId, preferences } = data;
     console.error(`🔍 Eşleşme isteği:`, { userId, preferences });
+    
+    // Kullanıcıyı bekleme listesine ekle
+    waitingUsers.set(userId, { socketId: socket.id, preferences });
+    
+    // Eşleşme arama durumunu bildir
+    socket.emit('waiting_for_match');
+    
+    // Eşleşme kontrolü
+    findMatch(userId);
+  });
+
+  socket.on("cancel_search", (userId) => {
+    console.error(`❌ Eşleşme araması iptal edildi: ${userId}`);
+    waitingUsers.delete(userId);
   });
 
   socket.on("disconnect", () => {
@@ -61,10 +78,11 @@ io.on("connection", (socket) => {
     console.error(`❌ Kullanıcı ayrıldı: ${socket.id}`);
     console.error(`📊 Kalan bağlı kullanıcı sayısı: ${connectionCount}`);
     
-    // Kullanıcıyı activeUsers'dan kaldır
-    for (const [userId, socketId] of activeUsers.entries()) {
-      if (socketId === socket.id) {
+    // Kullanıcıyı activeUsers ve waitingUsers'dan kaldır
+    for (const [userId, userData] of activeUsers.entries()) {
+      if (userData.socketId === socket.id) {
         activeUsers.delete(userId);
+        waitingUsers.delete(userId);
         console.error(`👤 Kullanıcı çıkış yaptı: ${userId}`);
         console.error(`📊 Kalan aktif kullanıcılar: ${Array.from(activeUsers.keys()).join(', ')}`);
         break;
@@ -72,6 +90,51 @@ io.on("connection", (socket) => {
     }
   });
 });
+
+// Eşleşme bulma fonksiyonu
+function findMatch(userId) {
+  const currentUser = waitingUsers.get(userId);
+  if (!currentUser) return;
+
+  // Tüm bekleyen kullanıcıları kontrol et
+  for (const [otherUserId, otherUser] of waitingUsers.entries()) {
+    if (otherUserId !== userId) {
+      // Tercihleri kontrol et
+      if (arePreferencesCompatible(currentUser.preferences, otherUser.preferences)) {
+        // Eşleşme bulundu
+        const match = {
+          user1: {
+            id: userId,
+            socketId: currentUser.socketId,
+            profile: activeUsers.get(userId).profile
+          },
+          user2: {
+            id: otherUserId,
+            socketId: otherUser.socketId,
+            profile: activeUsers.get(otherUserId).profile
+          }
+        };
+
+        // Her iki kullanıcıya da eşleşme bilgisini gönder
+        io.to(currentUser.socketId).emit('match_found', match);
+        io.to(otherUser.socketId).emit('match_found', match);
+
+        // Kullanıcıları bekleme listesinden çıkar
+        waitingUsers.delete(userId);
+        waitingUsers.delete(otherUserId);
+
+        console.error(`✨ Eşleşme bulundu: ${userId} ve ${otherUserId}`);
+        break;
+      }
+    }
+  }
+}
+
+// Tercihleri kontrol etme fonksiyonu
+function arePreferencesCompatible(prefs1, prefs2) {
+  // Basit bir eşleşme mantığı - geliştirilebilir
+  return true; // Şimdilik tüm kullanıcıları eşleştir
+}
 
 const PORT = process.env.PORT || 3000;
 const HOST = '0.0.0.0'; // Tüm IP adreslerinden erişime izin ver
