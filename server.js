@@ -10,9 +10,9 @@ const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// Updated CORS configuration
+// Enhanced CORS configuration
 const corsOptions = {
-  origin: true, // This allows the server to reflect the request origin
+  origin: '*', // Allow all origins in development
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
@@ -24,16 +24,13 @@ app.use(express.static('dist'));
 
 const server = createServer(app);
 
-// Updated Socket.IO configuration
+// Improved Socket.IO configuration
 const io = new Server(server, {
-  cors: {
-    origin: true,
-    methods: ['GET', 'POST'],
-    credentials: true
-  },
-  transports: ['websocket', 'polling'],
+  cors: corsOptions,
+  transports: ['polling', 'websocket'],
   pingTimeout: 60000,
   pingInterval: 25000,
+  allowEIO3: true,
   connectTimeout: 45000,
   maxHttpBufferSize: 1e8
 });
