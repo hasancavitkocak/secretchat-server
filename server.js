@@ -4,246 +4,229 @@ import { Server } from 'socket.io';
 import cors from 'cors';
 import path from 'path';
 import { fileURLToPath } from 'url';
-import { createClient } from '@supabase/supabase-js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize Supabase client
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
 const app = express();
 
-app.use(cors({
-  origin: true,
+// Enhanced CORS configuration
+const corsOptions = {
+  origin: '*', // Allow all origins in development
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
-}));
+};
+
+app.use(cors(corsOptions));
 app.use(express.json());
 app.use(express.static('dist'));
 
 const server = createServer(app);
 
+// Improved Socket.IO configuration
 const io = new Server(server, {
-  cors: {
-    origin: true,
-    credentials: true,
-    methods: ["GET", "POST"]
-  },
-  transports: ['websocket', 'polling']
+  cors: corsOptions,
+  transports: ['polling', 'websocket'],
+  pingTimeout: 60000,
+  pingInterval: 25000,
+  allowEIO3: true,
+  connectTimeout: 45000,
+  maxHttpBufferSize: 1e8
 });
 
 // In-memory storage
 const users = new Map();
 const waitingUsers = new Map();
+const connections = new Set();
 const activeChats = new Map();
 
-io.on('connection', (socket) => {
-  console.log('New connection:', socket.id);
+// Utility function for logging
+const log = (message, data = {}) => {
+  console.log(`[${new Date().toISOString()}] ${message}`, data);
+};
 
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  log('New connection established', { socketId: socket.id });
+  connections.add(socket.id);
+
+  // Handle user registration
   socket.on('register', (data) => {
-    const { userId } = data;
-    users.set(userId, {
-      socketId: socket.id,
-      lastActive: new Date()
-    });
-    console.log('User registered:', userId);
+    try {
+      const { userId } = data;
+      log('User registered', { userId, socketId: socket.id });
+      
+      users.set(userId, {
+        socketId: socket.id,
+        lastActive: new Date()
+      });
+      
+      socket.emit('registration_successful', { userId });
+    } catch (error) {
+      log('Registration error', { error: error.message });
+      socket.emit('error', { message: 'Registration failed' });
+    }
   });
 
-  socket.on('find_match', async (data) => {
-    const { userId, preferences } = data;
-    console.log('Finding match for:', userId, 'with preferences:', preferences);
-
+  // Handle match finding
+  socket.on('find_match', (data) => {
     try {
-      // Verify user exists and is online before adding to waiting list
-      const { data: userProfile, error: userError } = await supabase
-        .from('user_profiles')
-        .select('id, is_online, preferred_gender, interests')
-        .eq('id', userId)
-        .single();
-
-      if (userError) {
-        console.error('Error fetching user profile:', userError);
-        return;
-      }
-
-      if (!userProfile || !userProfile.is_online) {
-        console.log('User not found or offline:', userId);
-        return;
-      }
+      const { userId, preferences } = data;
+      log('Match request received', { userId, preferences });
 
       waitingUsers.set(userId, {
         socketId: socket.id,
-        preferences: {
-          ...preferences,
-          userProfile
-        },
+        preferences,
         timestamp: new Date()
       });
 
+      socket.emit('searching');
       findMatch(userId);
     } catch (error) {
-      console.error('Error in find_match handler:', error);
+      log('Match finding error', { error: error.message });
+      socket.emit('error', { message: 'Match finding failed' });
     }
   });
 
+  // Handle search cancellation
   socket.on('cancel_search', (userId) => {
-    waitingUsers.delete(userId);
+    try {
+      log('Search cancelled', { userId });
+      waitingUsers.delete(userId);
+      socket.emit('search_cancelled');
+    } catch (error) {
+      log('Cancel search error', { error: error.message });
+      socket.emit('error', { message: 'Failed to cancel search' });
+    }
   });
 
+  // Handle message sending
   socket.on('send_message', (data) => {
-    const { to, message } = data;
-    const recipientSocket = users.get(to)?.socketId;
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('receive_message', message);
-    }
-  });
-
-  socket.on('typing', (data) => {
-    const { partnerId, isTyping } = data;
-    const recipientSocket = users.get(partnerId)?.socketId;
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('partner_typing', isTyping);
-    }
-  });
-
-  socket.on('end_chat', (data) => {
-    const { partnerId, reason } = data;
-    const recipientSocket = users.get(partnerId)?.socketId;
-    if (recipientSocket) {
-      io.to(recipientSocket).emit('chat_ended', { reason });
-    }
-  });
-
-  socket.on('disconnect', () => {
-    for (const [userId, userData] of users.entries()) {
-      if (userData.socketId === socket.id) {
-        users.delete(userId);
-        waitingUsers.delete(userId);
-        break;
+    try {
+      const { to, message } = data;
+      const recipientSocket = users.get(to)?.socketId;
+      
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('receive_message', message);
+        log('Message sent', { to, from: socket.id });
       }
+    } catch (error) {
+      log('Message sending error', { error: error.message });
+      socket.emit('error', { message: 'Failed to send message' });
+    }
+  });
+
+  // Handle typing status
+  socket.on('typing', (data) => {
+    try {
+      const { partnerId, isTyping } = data;
+      const recipientSocket = users.get(partnerId)?.socketId;
+      
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('partner_typing', isTyping);
+      }
+    } catch (error) {
+      log('Typing status error', { error: error.message });
+    }
+  });
+
+  // Handle chat ending
+  socket.on('end_chat', (data) => {
+    try {
+      const { partnerId, reason } = data;
+      const recipientSocket = users.get(partnerId)?.socketId;
+      
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('chat_ended', { reason });
+        log('Chat ended', { partnerId, reason });
+      }
+    } catch (error) {
+      log('End chat error', { error: error.message });
+    }
+  });
+
+  // Handle disconnection
+  socket.on('disconnect', () => {
+    try {
+      connections.delete(socket.id);
+      
+      // Remove user from users and waiting lists
+      for (const [userId, userData] of users.entries()) {
+        if (userData.socketId === socket.id) {
+          users.delete(userId);
+          waitingUsers.delete(userId);
+          
+          // Notify chat partner if in active chat
+          const chatPartner = activeChats.get(userId);
+          if (chatPartner) {
+            const partnerSocket = users.get(chatPartner)?.socketId;
+            if (partnerSocket) {
+              io.to(partnerSocket).emit('chat_ended', { reason: 'disconnected' });
+            }
+            activeChats.delete(userId);
+            activeChats.delete(chatPartner);
+          }
+          
+          log('User disconnected', { userId });
+          break;
+        }
+      }
+    } catch (error) {
+      log('Disconnect error', { error: error.message });
     }
   });
 });
 
-async function findMatch(userId) {
+// Match finding logic
+function findMatch(userId) {
   const currentUser = waitingUsers.get(userId);
   if (!currentUser) return;
 
-  try {
-    // Get current user's profile and preferences
-    const { data: currentUserProfile, error: currentUserError } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('id', userId)
-      .single();
+  const potentialMatches = Array.from(waitingUsers.entries())
+    .filter(([id]) => id !== userId)
+    .sort(() => Math.random() - 0.5);
 
-    if (currentUserError || !currentUserProfile || !currentUserProfile.is_online) {
-      console.log('Current user not found or offline:', userId);
-      waitingUsers.delete(userId);
-      io.to(currentUser.socketId).emit('match_error', { message: 'User offline or not found' });
-      return;
-    }
-
-    // Get potential matches
-    const { data: potentialMatches, error: matchError } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('is_online', true)
-      .neq('id', userId)
-      .not('reported_by', 'cs', `{${userId}}`);
-
-    if (matchError) {
-      console.error('Error fetching potential matches:', matchError);
-      io.to(currentUser.socketId).emit('match_error', { message: 'Failed to find matches' });
-      return;
-    }
-
-    if (!potentialMatches?.length) {
-      console.log('No potential matches found for:', userId);
-      io.to(currentUser.socketId).emit('match_error', { message: 'No matches available' });
-      return;
-    }
-
-    // Filter matches based on preferences
-    let filteredMatches = potentialMatches.filter(match => {
-      // Check if user is already in a chat
-      const isInChat = activeChats.has(match.id);
-      if (isInChat) return false;
-
-      // Check gender preference if specified
-      if (currentUserProfile.preferred_gender && 
-          currentUserProfile.preferred_gender !== 'any' && 
-          match.gender !== currentUserProfile.preferred_gender) {
-        return false;
-      }
-
-      // Check interests if specified
-      if (currentUserProfile.interests?.length && 
-          !currentUserProfile.interests.includes('any')) {
-        return match.interests?.some(interest => 
-          currentUserProfile.interests.includes(interest)
-        );
-      }
-
-      return true;
-    });
-
-    if (!filteredMatches.length) {
-      console.log('No suitable matches found for:', userId);
-      io.to(currentUser.socketId).emit('match_error', { message: 'No suitable matches found' });
-      return;
-    }
-
-    // Select random match
-    const match = filteredMatches[Math.floor(Math.random() * filteredMatches.length)];
-
-    // Create chat match in database
-    const { error: chatError } = await supabase
-      .from('chat_matches')
-      .insert([{
-        user1_id: userId,
-        user2_id: match.id,
-        status: 'active'
-      }]);
-
-    if (chatError) {
-      console.error('Error creating chat match:', chatError);
-      io.to(currentUser.socketId).emit('match_error', { message: 'Failed to create chat' });
-      return;
-    }
-
-    // Add to active chats
-    activeChats.set(userId, match.id);
-    activeChats.set(match.id, userId);
+  for (const [matchId, matchData] of potentialMatches) {
+    // Create chat pair
+    activeChats.set(userId, matchId);
+    activeChats.set(matchId, userId);
 
     // Notify both users
-    const matchUserSocket = users.get(match.id)?.socketId;
+    io.to(currentUser.socketId).emit('match_found', {
+      partnerId: matchId
+    });
+    
+    io.to(matchData.socketId).emit('match_found', {
+      partnerId: userId
+    });
 
-    io.to(currentUser.socketId).emit('match_found', { partnerId: match.id });
-    if (matchUserSocket) {
-      io.to(matchUserSocket).emit('match_found', { partnerId: userId });
-    }
-
-    // Remove from waiting list
+    // Remove both users from waiting list
     waitingUsers.delete(userId);
-    waitingUsers.delete(match.id);
+    waitingUsers.delete(matchId);
 
-    console.log('Match created between:', userId, 'and', match.id);
-  } catch (error) {
-    console.error('Error in findMatch:', error);
-    io.to(currentUser.socketId).emit('match_error', { message: 'Internal server error' });
-    waitingUsers.delete(userId);
+    log('Match created', { user1: userId, user2: matchId });
+    break;
   }
 }
 
-// Serve React app
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    connections: connections.size,
+    users: users.size,
+    waiting: waitingUsers.size,
+    activeChats: activeChats.size
+  });
+});
+
+// Handle React Router routes
 app.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'dist', 'index.html'));
 });
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+  log(`Server running on port ${PORT}`);
 });
