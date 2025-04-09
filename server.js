@@ -27,7 +27,7 @@ const server = createServer(app);
 // Improved Socket.IO configuration
 const io = new Server(server, {
   cors: corsOptions,
-  transports: ['polling', 'websocket'], // Start with polling, upgrade to websocket
+  transports: ['polling', 'websocket'],
   pingTimeout: 60000,
   pingInterval: 25000,
   allowEIO3: true,
@@ -39,6 +39,7 @@ const io = new Server(server, {
 const users = new Map();
 const waitingUsers = new Map();
 const connections = new Set();
+const activeChats = new Map();
 
 // Utility function for logging
 const log = (message, data = {}) => {
@@ -116,6 +117,35 @@ io.on('connection', (socket) => {
     }
   });
 
+  // Handle typing status
+  socket.on('typing', (data) => {
+    try {
+      const { partnerId, isTyping } = data;
+      const recipientSocket = users.get(partnerId)?.socketId;
+      
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('partner_typing', isTyping);
+      }
+    } catch (error) {
+      log('Typing status error', { error: error.message });
+    }
+  });
+
+  // Handle chat ending
+  socket.on('end_chat', (data) => {
+    try {
+      const { partnerId, reason } = data;
+      const recipientSocket = users.get(partnerId)?.socketId;
+      
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('chat_ended', { reason });
+        log('Chat ended', { partnerId, reason });
+      }
+    } catch (error) {
+      log('End chat error', { error: error.message });
+    }
+  });
+
   // Handle disconnection
   socket.on('disconnect', () => {
     try {
@@ -126,6 +156,18 @@ io.on('connection', (socket) => {
         if (userData.socketId === socket.id) {
           users.delete(userId);
           waitingUsers.delete(userId);
+          
+          // Notify chat partner if in active chat
+          const chatPartner = activeChats.get(userId);
+          if (chatPartner) {
+            const partnerSocket = users.get(chatPartner)?.socketId;
+            if (partnerSocket) {
+              io.to(partnerSocket).emit('chat_ended', { reason: 'disconnected' });
+            }
+            activeChats.delete(userId);
+            activeChats.delete(chatPartner);
+          }
+          
           log('User disconnected', { userId });
           break;
         }
@@ -146,10 +188,9 @@ function findMatch(userId) {
     .sort(() => Math.random() - 0.5);
 
   for (const [matchId, matchData] of potentialMatches) {
-    const match = {
-      user1: userId,
-      user2: matchId
-    };
+    // Create chat pair
+    activeChats.set(userId, matchId);
+    activeChats.set(matchId, userId);
 
     // Notify both users
     io.to(currentUser.socketId).emit('match_found', {
@@ -164,7 +205,7 @@ function findMatch(userId) {
     waitingUsers.delete(userId);
     waitingUsers.delete(matchId);
 
-    log('Match created', match);
+    log('Match created', { user1: userId, user2: matchId });
     break;
   }
 }
@@ -175,7 +216,8 @@ app.get('/health', (req, res) => {
     status: 'healthy',
     connections: connections.size,
     users: users.size,
-    waiting: waitingUsers.size
+    waiting: waitingUsers.size,
+    activeChats: activeChats.size
   });
 });
 
