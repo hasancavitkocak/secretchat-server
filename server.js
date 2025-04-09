@@ -9,17 +9,13 @@ import { createClient } from '@supabase/supabase-js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Initialize Supabase client
-const supabaseUrl = process.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY;
-const supabase = createClient(supabaseUrl, supabaseAnonKey);
-
 const app = express();
 
 app.use(cors({
   origin: true,
   credentials: true
 }));
+
 app.use(express.json());
 app.use(express.static('dist'));
 
@@ -31,7 +27,8 @@ const io = new Server(server, {
     credentials: true,
     methods: ["GET", "POST"]
   },
-  transports: ['websocket', 'polling']
+  pingTimeout: 60000,
+  pingInterval: 25000
 });
 
 // In-memory storage
@@ -46,21 +43,12 @@ io.on('connection', (socket) => {
   socket.on('register', async (data, callback) => {
     try {
       const { userId } = data;
-      currentUserId = userId;
-
-      // Verify user exists
-      const { data: user, error } = await supabase
-        .from('user_profiles')
-        .select('id, is_online')
-        .eq('id', userId)
-        .single();
-
-      if (error || !user) {
-        callback({ error: 'User not found' });
+      if (!userId) {
+        callback({ error: 'User ID is required' });
         return;
       }
 
-      // Store socket information
+      currentUserId = userId;
       users.set(userId, {
         socketId: socket.id,
         lastActive: new Date()
@@ -78,14 +66,18 @@ io.on('connection', (socket) => {
     try {
       const { userId, preferences } = data;
       
+      if (!userId) {
+        callback({ error: 'User ID is required' });
+        return;
+      }
+
       if (!users.has(userId)) {
         callback({ error: 'User not registered' });
         return;
       }
 
-      // Check if user is already in a chat
       if (activeChats.has(userId)) {
-        callback({ error: 'User already in chat' });
+        callback({ error: 'Already in chat' });
         return;
       }
 
@@ -98,8 +90,8 @@ io.on('connection', (socket) => {
 
       callback({ success: true });
       
-      // Try to find a match
-      await findMatch(userId);
+      // Find match for user
+      findMatch(userId);
     } catch (error) {
       console.error('Find match error:', error);
       callback({ error: 'Failed to start matching' });
@@ -109,6 +101,11 @@ io.on('connection', (socket) => {
   socket.on('cancel_search', (data, callback) => {
     try {
       const { userId } = data;
+      if (!userId) {
+        callback({ error: 'User ID is required' });
+        return;
+      }
+
       waitingUsers.delete(userId);
       callback({ success: true });
     } catch (error) {
@@ -119,14 +116,19 @@ io.on('connection', (socket) => {
   socket.on('send_message', (data, callback) => {
     try {
       const { to, message } = data;
-      const recipientSocket = users.get(to)?.socketId;
-      
-      if (recipientSocket) {
-        io.to(recipientSocket).emit('receive_message', message);
-        callback({ success: true });
-      } else {
-        callback({ error: 'Recipient not found' });
+      if (!to || !message) {
+        callback({ error: 'Invalid message data' });
+        return;
       }
+
+      const recipientSocket = users.get(to)?.socketId;
+      if (!recipientSocket) {
+        callback({ error: 'Recipient not found' });
+        return;
+      }
+
+      io.to(recipientSocket).emit('receive_message', message);
+      callback({ success: true });
     } catch (error) {
       callback({ error: 'Failed to send message' });
     }
@@ -134,6 +136,8 @@ io.on('connection', (socket) => {
 
   socket.on('typing', (data) => {
     const { partnerId, isTyping } = data;
+    if (!partnerId) return;
+
     const recipientSocket = users.get(partnerId)?.socketId;
     if (recipientSocket) {
       io.to(recipientSocket).emit('partner_typing', isTyping);
@@ -142,12 +146,11 @@ io.on('connection', (socket) => {
 
   socket.on('end_chat', (data) => {
     const { partnerId, reason } = data;
+    if (!partnerId || !currentUserId) return;
     
     // Remove from active chats
-    if (currentUserId) {
-      activeChats.delete(currentUserId);
-      activeChats.delete(partnerId);
-    }
+    activeChats.delete(currentUserId);
+    activeChats.delete(partnerId);
 
     const recipientSocket = users.get(partnerId)?.socketId;
     if (recipientSocket) {
@@ -157,113 +160,96 @@ io.on('connection', (socket) => {
 
   socket.on('disconnect', () => {
     if (currentUserId) {
+      console.log('User disconnected:', currentUserId);
       users.delete(currentUserId);
       waitingUsers.delete(currentUserId);
-      activeChats.delete(currentUserId);
+      
+      // Notify chat partner if in active chat
+      const partnerId = activeChats.get(currentUserId);
+      if (partnerId) {
+        const partnerSocket = users.get(partnerId)?.socketId;
+        if (partnerSocket) {
+          io.to(partnerSocket).emit('chat_ended', { reason: 'disconnected' });
+        }
+        activeChats.delete(currentUserId);
+        activeChats.delete(partnerId);
+      }
     }
   });
 });
 
-async function findMatch(userId) {
+function findMatch(userId) {
   const currentUser = waitingUsers.get(userId);
   if (!currentUser) return;
 
-  try {
-    // Get current user's profile
-    const { data: currentUserProfile, error: currentUserError } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('id', userId)
-      .single();
+  // Get all waiting users except current user
+  const potentialMatches = Array.from(waitingUsers.entries())
+    .filter(([id]) => id !== userId)
+    .map(([id, data]) => ({ id, ...data }));
 
-    if (currentUserError || !currentUserProfile) {
-      throw new Error('Current user not found');
-    }
-
-    // Get potential matches
-    const { data: potentialMatches, error: matchError } = await supabase
-      .from('user_profiles')
-      .select('*')
-      .eq('is_online', true)
-      .neq('id', userId)
-      .not('reported_by', 'cs', `{${userId}}`);
-
-    if (matchError || !potentialMatches?.length) {
-      throw new Error('No potential matches found');
-    }
-
-    // Filter matches
-    const filteredMatches = potentialMatches.filter(match => {
-      // Skip users already in chat or waiting
-      if (activeChats.has(match.id) || waitingUsers.has(match.id)) {
-        return false;
-      }
-
-      // Check gender preference
-      if (currentUser.preferences?.preferred_gender && 
-          currentUser.preferences.preferred_gender !== 'any' && 
-          match.gender !== currentUser.preferences.preferred_gender) {
-        return false;
-      }
-
-      // Check interests
-      if (currentUser.preferences?.interests?.length && 
-          !currentUser.preferences.interests.includes('any')) {
-        return match.interests?.some(interest => 
-          currentUser.preferences.interests.includes(interest)
-        );
-      }
-
-      return true;
-    });
-
-    if (!filteredMatches.length) {
-      throw new Error('No suitable matches found');
-    }
-
-    // Select random match
-    const match = filteredMatches[Math.floor(Math.random() * filteredMatches.length)];
-    const matchSocket = users.get(match.id)?.socketId;
-
-    if (!matchSocket) {
-      throw new Error('Selected match is offline');
-    }
-
-    // Create chat match
-    const { error: chatError } = await supabase
-      .from('chat_matches')
-      .insert([{
-        user1_id: userId,
-        user2_id: match.id,
-        status: 'active'
-      }]);
-
-    if (chatError) {
-      throw new Error('Failed to create chat match');
-    }
-
-    // Add to active chats
-    activeChats.set(userId, match.id);
-    activeChats.set(match.id, userId);
-
-    // Remove from waiting list
-    waitingUsers.delete(userId);
-    waitingUsers.delete(match.id);
-
-    // Notify both users
-    io.to(currentUser.socketId).emit('match_found', { partnerId: match.id });
-    io.to(matchSocket).emit('match_found', { partnerId: userId });
-
-    console.log('Match created between:', userId, 'and', match.id);
-  } catch (error) {
-    console.error('Error in findMatch:', error);
-    const userSocket = users.get(userId)?.socketId;
-    if (userSocket) {
-      io.to(userSocket).emit('match_error', { message: error.message });
-    }
-    waitingUsers.delete(userId);
+  if (potentialMatches.length === 0) {
+    return;
   }
+
+  // Find suitable match based on preferences
+  const match = potentialMatches.find(match => {
+    // Skip users already in chat
+    if (activeChats.has(match.id)) {
+      return false;
+    }
+
+    // Check gender preferences if specified
+    if (currentUser.preferences?.preferred_gender && 
+        currentUser.preferences.preferred_gender !== 'any') {
+      // Skip if no match
+      if (!match.preferences?.gender || 
+          match.preferences.gender !== currentUser.preferences.preferred_gender) {
+        return false;
+      }
+    }
+
+    // Check interests if specified
+    if (currentUser.preferences?.interests?.length && 
+        !currentUser.preferences.interests.includes('any')) {
+      // Skip if no common interests
+      if (!match.preferences?.interests?.some(interest => 
+        currentUser.preferences.interests.includes(interest)
+      )) {
+        return false;
+      }
+    }
+
+    return true;
+  });
+
+  if (!match) {
+    return;
+  }
+
+  // Create the match
+  activeChats.set(userId, match.id);
+  activeChats.set(match.id, userId);
+
+  // Remove both users from waiting list
+  waitingUsers.delete(userId);
+  waitingUsers.delete(match.id);
+
+  // Notify both users
+  io.to(currentUser.socketId).emit('match_found', { partnerId: match.id });
+  io.to(match.socketId).emit('match_found', { partnerId: userId });
+
+  console.log('Match created between:', userId, 'and', match.id);
 }
+
+// API Routes
+app.get('/api/stats', (req, res) => {
+  res.json({
+    totalUsers: users.size,
+    activeConnections: io.engine.clientsCount,
+    totalMessages: 0, // Implement message counting if needed
+    activeChatRooms: activeChats.size / 2 // Divide by 2 as each chat is counted twice
+  });
+});
 
 // Serve React app
 app.get('*', (req, res) => {
