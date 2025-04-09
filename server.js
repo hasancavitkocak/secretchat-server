@@ -142,6 +142,7 @@ async function findMatch(userId) {
     if (currentUserError || !currentUserProfile || !currentUserProfile.is_online) {
       console.log('Current user not found or offline:', userId);
       waitingUsers.delete(userId);
+      io.to(currentUser.socketId).emit('match_error', { message: 'User offline or not found' });
       return;
     }
 
@@ -151,51 +152,55 @@ async function findMatch(userId) {
       .select('*')
       .eq('is_online', true)
       .neq('id', userId)
-      .not('reported_by', 'cs', `{${userId}}`)
-      .not('id', 'in', `(
-        SELECT user2_id FROM chat_matches 
-        WHERE user1_id = '${userId}' AND status != 'ended'
-        UNION
-        SELECT user1_id FROM chat_matches 
-        WHERE user2_id = '${userId}' AND status != 'ended'
-      )`);
+      .not('reported_by', 'cs', `{${userId}}`);
 
     if (matchError) {
       console.error('Error fetching potential matches:', matchError);
+      io.to(currentUser.socketId).emit('match_error', { message: 'Failed to find matches' });
       return;
     }
 
     if (!potentialMatches?.length) {
       console.log('No potential matches found for:', userId);
+      io.to(currentUser.socketId).emit('match_error', { message: 'No matches available' });
       return;
     }
 
     // Filter matches based on preferences
-    let filteredMatches = potentialMatches;
-    const userPrefs = currentUser.preferences;
+    let filteredMatches = potentialMatches.filter(match => {
+      // Check if user is already in a chat
+      const isInChat = activeChats.has(match.id);
+      if (isInChat) return false;
 
-    if (userPrefs.preferred_gender && userPrefs.preferred_gender !== 'any') {
-      filteredMatches = filteredMatches.filter(match => 
-        match.gender === userPrefs.preferred_gender
-      );
-    }
+      // Check gender preference if specified
+      if (currentUserProfile.preferred_gender && 
+          currentUserProfile.preferred_gender !== 'any' && 
+          match.gender !== currentUserProfile.preferred_gender) {
+        return false;
+      }
 
-    if (userPrefs.interests?.length && !userPrefs.interests.includes('any')) {
-      filteredMatches = filteredMatches.filter(match =>
-        match.interests?.some(interest => userPrefs.interests.includes(interest))
-      );
-    }
+      // Check interests if specified
+      if (currentUserProfile.interests?.length && 
+          !currentUserProfile.interests.includes('any')) {
+        return match.interests?.some(interest => 
+          currentUserProfile.interests.includes(interest)
+        );
+      }
 
-    // Select random match from filtered list
-    const match = filteredMatches[Math.floor(Math.random() * filteredMatches.length)];
-    
-    if (!match) {
-      console.log('No suitable match found for:', userId);
+      return true;
+    });
+
+    if (!filteredMatches.length) {
+      console.log('No suitable matches found for:', userId);
+      io.to(currentUser.socketId).emit('match_error', { message: 'No suitable matches found' });
       return;
     }
 
-    // Create match in database
-    const { error: matchCreateError } = await supabase
+    // Select random match
+    const match = filteredMatches[Math.floor(Math.random() * filteredMatches.length)];
+
+    // Create chat match in database
+    const { error: chatError } = await supabase
       .from('chat_matches')
       .insert([{
         user1_id: userId,
@@ -203,34 +208,32 @@ async function findMatch(userId) {
         status: 'active'
       }]);
 
-    if (matchCreateError) {
-      console.error('Error creating match:', matchCreateError);
+    if (chatError) {
+      console.error('Error creating chat match:', chatError);
+      io.to(currentUser.socketId).emit('match_error', { message: 'Failed to create chat' });
       return;
     }
 
+    // Add to active chats
+    activeChats.set(userId, match.id);
+    activeChats.set(match.id, userId);
+
     // Notify both users
-    const currentUserSocket = currentUser.socketId;
     const matchUserSocket = users.get(match.id)?.socketId;
 
-    if (currentUserSocket) {
-      io.to(currentUserSocket).emit('match_found', {
-        partnerId: match.id
-      });
-    }
-
+    io.to(currentUser.socketId).emit('match_found', { partnerId: match.id });
     if (matchUserSocket) {
-      io.to(matchUserSocket).emit('match_found', {
-        partnerId: userId
-      });
+      io.to(matchUserSocket).emit('match_found', { partnerId: userId });
     }
 
-    // Remove both users from waiting list
+    // Remove from waiting list
     waitingUsers.delete(userId);
     waitingUsers.delete(match.id);
 
     console.log('Match created between:', userId, 'and', match.id);
   } catch (error) {
     console.error('Error in findMatch:', error);
+    io.to(currentUser.socketId).emit('match_error', { message: 'Internal server error' });
     waitingUsers.delete(userId);
   }
 }
