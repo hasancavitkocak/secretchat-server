@@ -1,146 +1,190 @@
-const express = require("express");
-const http = require("http");
-const cors = require("cors");
-const { Server } = require("socket.io");
+import express from 'express';
+import { createServer } from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import path from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const app = express();
 
-// CORS ayarlarını güncelle - tüm IP'lere izin ver
-app.use(cors({
-  origin: "*",
-  methods: ["GET", "POST"],
+// Enhanced CORS configuration
+const corsOptions = {
+  origin: '*', // Allow all origins in development
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   credentials: true
-}));
+};
 
-const server = http.createServer(app);
+app.use(cors(corsOptions));
+app.use(express.json());
+app.use(express.static('dist'));
 
-// Socket.IO ayarlarını güncelle - tüm IP'lere izin ver
+const server = createServer(app);
+
+// Improved Socket.IO configuration
 const io = new Server(server, {
-  cors: {
-    origin: "*",
-    methods: ["GET", "POST"],
-    credentials: true
-  },
-  transports: ['websocket', 'polling'],
+  cors: corsOptions,
+  transports: ['polling', 'websocket'], // Start with polling, upgrade to websocket
   pingTimeout: 60000,
-  pingInterval: 25000
+  pingInterval: 25000,
+  allowEIO3: true,
+  connectTimeout: 45000,
+  maxHttpBufferSize: 1e8
 });
 
-// Bağlantı sayacı ve aktif kullanıcılar
-let connectionCount = 0;
-const activeUsers = new Map();
-const waitingUsers = new Map(); // Eşleşme bekleyen kullanıcılar
+// In-memory storage
+const users = new Map();
+const waitingUsers = new Map();
+const connections = new Set();
 
-// Test endpoint'i
-app.get('/test', (req, res) => {
-  res.json({ 
-    status: 'Server is running',
-    connections: connectionCount,
-    activeUsers: Array.from(activeUsers.keys()),
-    waitingUsers: Array.from(waitingUsers.keys()),
-    timestamp: new Date().toISOString()
-  });
-});
+// Utility function for logging
+const log = (message, data = {}) => {
+  console.log(`[${new Date().toISOString()}] ${message}`, data);
+};
 
-io.on("connection", (socket) => {
-  connectionCount++;
-  console.error(`✅ Yeni kullanıcı bağlandı! Socket ID: ${socket.id}`);
-  console.error(`📊 Toplam bağlı kullanıcı sayısı: ${connectionCount}`);
+// Socket.IO connection handling
+io.on('connection', (socket) => {
+  log('New connection established', { socketId: socket.id });
+  connections.add(socket.id);
 
-  socket.on("register", (data) => {
-    const { userId, profile } = data;
-    activeUsers.set(userId, { socketId: socket.id, profile });
-    console.error(`👤 Kullanıcı kaydı: ${userId}`);
-    console.error(`📊 Aktif kullanıcılar: ${Array.from(activeUsers.keys()).join(', ')}`);
-  });
-
-  socket.on("find_match", (data) => {
-    const { userId, preferences } = data;
-    console.error(`🔍 Eşleşme isteği:`, { userId, preferences });
-    
-    // Kullanıcıyı bekleme listesine ekle
-    waitingUsers.set(userId, { socketId: socket.id, preferences });
-    
-    // Eşleşme arama durumunu bildir
-    socket.emit('waiting_for_match');
-    
-    // Eşleşme kontrolü
-    findMatch(userId);
+  // Handle user registration
+  socket.on('register', (data) => {
+    try {
+      const { userId } = data;
+      log('User registered', { userId, socketId: socket.id });
+      
+      users.set(userId, {
+        socketId: socket.id,
+        lastActive: new Date()
+      });
+      
+      socket.emit('registration_successful', { userId });
+    } catch (error) {
+      log('Registration error', { error: error.message });
+      socket.emit('error', { message: 'Registration failed' });
+    }
   });
 
-  socket.on("cancel_search", (userId) => {
-    console.error(`❌ Eşleşme araması iptal edildi: ${userId}`);
-    waitingUsers.delete(userId);
+  // Handle match finding
+  socket.on('find_match', (data) => {
+    try {
+      const { userId, preferences } = data;
+      log('Match request received', { userId, preferences });
+
+      waitingUsers.set(userId, {
+        socketId: socket.id,
+        preferences,
+        timestamp: new Date()
+      });
+
+      socket.emit('searching');
+      findMatch(userId);
+    } catch (error) {
+      log('Match finding error', { error: error.message });
+      socket.emit('error', { message: 'Match finding failed' });
+    }
   });
 
-  socket.on("disconnect", () => {
-    connectionCount--;
-    console.error(`❌ Kullanıcı ayrıldı: ${socket.id}`);
-    console.error(`📊 Kalan bağlı kullanıcı sayısı: ${connectionCount}`);
-    
-    // Kullanıcıyı activeUsers ve waitingUsers'dan kaldır
-    for (const [userId, userData] of activeUsers.entries()) {
-      if (userData.socketId === socket.id) {
-        activeUsers.delete(userId);
-        waitingUsers.delete(userId);
-        console.error(`👤 Kullanıcı çıkış yaptı: ${userId}`);
-        console.error(`📊 Kalan aktif kullanıcılar: ${Array.from(activeUsers.keys()).join(', ')}`);
-        break;
+  // Handle search cancellation
+  socket.on('cancel_search', (userId) => {
+    try {
+      log('Search cancelled', { userId });
+      waitingUsers.delete(userId);
+      socket.emit('search_cancelled');
+    } catch (error) {
+      log('Cancel search error', { error: error.message });
+      socket.emit('error', { message: 'Failed to cancel search' });
+    }
+  });
+
+  // Handle message sending
+  socket.on('send_message', (data) => {
+    try {
+      const { to, message } = data;
+      const recipientSocket = users.get(to)?.socketId;
+      
+      if (recipientSocket) {
+        io.to(recipientSocket).emit('receive_message', message);
+        log('Message sent', { to, from: socket.id });
       }
+    } catch (error) {
+      log('Message sending error', { error: error.message });
+      socket.emit('error', { message: 'Failed to send message' });
+    }
+  });
+
+  // Handle disconnection
+  socket.on('disconnect', () => {
+    try {
+      connections.delete(socket.id);
+      
+      // Remove user from users and waiting lists
+      for (const [userId, userData] of users.entries()) {
+        if (userData.socketId === socket.id) {
+          users.delete(userId);
+          waitingUsers.delete(userId);
+          log('User disconnected', { userId });
+          break;
+        }
+      }
+    } catch (error) {
+      log('Disconnect error', { error: error.message });
     }
   });
 });
 
-// Eşleşme bulma fonksiyonu
+// Match finding logic
 function findMatch(userId) {
   const currentUser = waitingUsers.get(userId);
   if (!currentUser) return;
 
-  // Tüm bekleyen kullanıcıları kontrol et
-  for (const [otherUserId, otherUser] of waitingUsers.entries()) {
-    if (otherUserId !== userId) {
-      // Tercihleri kontrol et
-      if (arePreferencesCompatible(currentUser.preferences, otherUser.preferences)) {
-        // Eşleşme bulundu
-        const match = {
-          user1: {
-            id: userId,
-            socketId: currentUser.socketId,
-            profile: activeUsers.get(userId).profile
-          },
-          user2: {
-            id: otherUserId,
-            socketId: otherUser.socketId,
-            profile: activeUsers.get(otherUserId).profile
-          }
-        };
+  const potentialMatches = Array.from(waitingUsers.entries())
+    .filter(([id]) => id !== userId)
+    .sort(() => Math.random() - 0.5);
 
-        // Her iki kullanıcıya da eşleşme bilgisini gönder
-        io.to(currentUser.socketId).emit('match_found', match);
-        io.to(otherUser.socketId).emit('match_found', match);
+  for (const [matchId, matchData] of potentialMatches) {
+    const match = {
+      user1: userId,
+      user2: matchId
+    };
 
-        // Kullanıcıları bekleme listesinden çıkar
-        waitingUsers.delete(userId);
-        waitingUsers.delete(otherUserId);
+    // Notify both users
+    io.to(currentUser.socketId).emit('match_found', {
+      partnerId: matchId
+    });
+    
+    io.to(matchData.socketId).emit('match_found', {
+      partnerId: userId
+    });
 
-        console.error(`✨ Eşleşme bulundu: ${userId} ve ${otherUserId}`);
-        break;
-      }
-    }
+    // Remove both users from waiting list
+    waitingUsers.delete(userId);
+    waitingUsers.delete(matchId);
+
+    log('Match created', match);
+    break;
   }
 }
 
-// Tercihleri kontrol etme fonksiyonu
-function arePreferencesCompatible(prefs1, prefs2) {
-  // Basit bir eşleşme mantığı - geliştirilebilir
-  return true; // Şimdilik tüm kullanıcıları eşleştir
-}
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({
+    status: 'healthy',
+    connections: connections.size,
+    users: users.size,
+    waiting: waitingUsers.size
+  });
+});
+
+// Handle React Router routes
+app.get('*', (req, res) => {
+  res.sendFile(path.join(__dirname, 'dist', 'index.html'));
+});
 
 const PORT = process.env.PORT || 3000;
-const HOST = '0.0.0.0'; // Tüm IP adreslerinden erişime izin ver
-
-server.listen(PORT, HOST, () => {
-  console.error(`🚀 Sunucu ${HOST}:${PORT} adresinde çalışıyor`);
-  console.error(`🌐 Yerel IP: http://192.168.1.103:${PORT}`);
-  console.error(`📊 Başlangıçta bağlı kullanıcı sayısı: ${connectionCount}`);
+server.listen(PORT, '0.0.0.0', () => {
+  log(`Server running on port ${PORT}`);
 });
