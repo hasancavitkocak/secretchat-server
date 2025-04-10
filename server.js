@@ -33,7 +33,7 @@ const waitingUsers = new Map();
 const activeChats = new Map();
 
 io.on('connection', (socket) => {
-  console.log('New connection:', socket.id);
+  console.log('🟢 New socket connection:', socket.id);
   let currentUserId = null;
 
   // Handle user registration
@@ -41,6 +41,7 @@ io.on('connection', (socket) => {
     try {
       const { userId } = data;
       if (!userId) {
+        console.log('❌ Registration failed: No user ID provided');
         callback({ error: 'User ID is required' });
         return;
       }
@@ -51,10 +52,15 @@ io.on('connection', (socket) => {
         lastActive: new Date()
       });
 
+      console.log('✅ User registered successfully:', {
+        userId,
+        socketId: socket.id,
+        totalUsers: users.size
+      });
+
       callback({ success: true });
-      console.log('User registered:', userId);
     } catch (error) {
-      console.error('Registration error:', error);
+      console.error('❌ Registration error:', error);
       callback({ error: 'Registration failed' });
     }
   });
@@ -65,16 +71,19 @@ io.on('connection', (socket) => {
       const { userId, preferences } = data;
       
       if (!userId) {
+        console.log('❌ Match finding failed: No user ID provided');
         callback({ error: 'User ID is required' });
         return;
       }
 
       if (!users.has(userId)) {
+        console.log('❌ Match finding failed: User not registered');
         callback({ error: 'User not registered' });
         return;
       }
 
       if (activeChats.has(userId)) {
+        console.log('❌ Match finding failed: User already in chat');
         callback({ error: 'Already in chat' });
         return;
       }
@@ -86,12 +95,18 @@ io.on('connection', (socket) => {
         timestamp: new Date()
       });
 
+      console.log('👥 User added to waiting list:', {
+        userId,
+        preferences,
+        waitingUsers: waitingUsers.size
+      });
+
       callback({ success: true });
       
       // Find match for user
       findMatch(userId);
     } catch (error) {
-      console.error('Find match error:', error);
+      console.error('❌ Find match error:', error);
       callback({ error: 'Failed to start matching' });
     }
   });
@@ -101,11 +116,13 @@ io.on('connection', (socket) => {
     try {
       const { userId } = data;
       if (!userId) {
+        console.log('❌ Search cancellation failed: No user ID provided');
         callback({ error: 'User ID is required' });
         return;
       }
 
       waitingUsers.delete(userId);
+      console.log('🚫 Search cancelled for user:', userId);
       callback({ success: true });
     } catch (error) {
       callback({ error: 'Failed to cancel search' });
@@ -117,15 +134,23 @@ io.on('connection', (socket) => {
     try {
       const { to, message } = data;
       if (!to || !message) {
+        console.log('❌ Message sending failed: Invalid data');
         callback({ error: 'Invalid message data' });
         return;
       }
 
       const recipientSocket = users.get(to)?.socketId;
       if (!recipientSocket) {
+        console.log('❌ Message sending failed: Recipient not found');
         callback({ error: 'Recipient not found' });
         return;
       }
+
+      console.log('📨 Message sent:', {
+        to,
+        from: currentUserId,
+        content: typeof message === 'string' ? message.substring(0, 20) + '...' : 'media content'
+      });
 
       io.to(recipientSocket).emit('receive_message', message);
       callback({ success: true });
@@ -141,6 +166,7 @@ io.on('connection', (socket) => {
 
     const recipientSocket = users.get(partnerId)?.socketId;
     if (recipientSocket) {
+      console.log('⌨️ Typing status:', { userId: currentUserId, partnerId, isTyping });
       io.to(recipientSocket).emit('partner_typing', isTyping);
     }
   });
@@ -156,6 +182,7 @@ io.on('connection', (socket) => {
 
     const recipientSocket = users.get(partnerId)?.socketId;
     if (recipientSocket) {
+      console.log('🔚 Chat ended:', { userId: currentUserId, partnerId, reason });
       io.to(recipientSocket).emit('chat_ended', { reason });
     }
   });
@@ -163,7 +190,11 @@ io.on('connection', (socket) => {
   // Handle disconnection
   socket.on('disconnect', () => {
     if (currentUserId) {
-      console.log('User disconnected:', currentUserId);
+      console.log('🔴 User disconnected:', {
+        userId: currentUserId,
+        socketId: socket.id
+      });
+      
       users.delete(currentUserId);
       waitingUsers.delete(currentUserId);
       
@@ -236,11 +267,15 @@ function findMatch(userId) {
   waitingUsers.delete(userId);
   waitingUsers.delete(match.id);
 
+  console.log('✨ Match created:', {
+    user1: userId,
+    user2: match.id,
+    activeChatRooms: activeChats.size / 2
+  });
+
   // Notify both users
   io.to(currentUser.socketId).emit('match_found', { partnerId: match.id });
   io.to(match.socketId).emit('match_found', { partnerId: userId });
-
-  console.log('Match created between:', userId, 'and', match.id);
 }
 
 // API Routes
@@ -255,5 +290,9 @@ app.get('/api/stats', (req, res) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`
+🚀 Server is running on port ${PORT}
+👥 Active users: 0
+💬 Active chat rooms: 0
+  `);
 });
